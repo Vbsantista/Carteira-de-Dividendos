@@ -8,7 +8,7 @@ st.set_page_config(page_title="Painel Barsi", page_icon="📈", layout="wide")
 CARTEIRA = {
     "BBAS3": "Banco", "BBSE3": "Seguros", "BRAP4": "Holding/Mineração",
     "CSMG3": "Saneamento", "CXSE3": "Seguros", 
-    "ISAE4": "Energia", "PETR4": "Petróleo",
+    "ISAE4": "Energia", "PETR4": "Petróleo", "ITSA4", "Banco",
 }
 PERENES = {"Banco", "Energia", "Saneamento", "Seguros", "Telecom"}
 
