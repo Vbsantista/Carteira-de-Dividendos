@@ -5,29 +5,39 @@ from datetime import datetime
 
 st.set_page_config(page_title="Painel Barsi", page_icon="📈", layout="wide")
 
-CARTEIRA = {
+PADRAO = {
     "BBAS3": "Banco", "BBSE3": "Seguros", "BRAP4": "Holding/Mineração",
-    "CSMG3": "Saneamento", "CXSE3": "Seguros", 
+    "CSMG3": "Saneamento", "CXSE3": "Seguros", "CYRE4": "Construção",
     "ISAE4": "Energia", "PETR4": "Petróleo",
 }
+SETORES = ["Banco", "Seguros", "Energia", "Saneamento", "Telecom", "Holding/Mineração",
+           "Petróleo", "Construção", "Varejo", "Indústria", "Outros"]
 PERENES = {"Banco", "Energia", "Saneamento", "Seguros", "Telecom"}
-
-st.sidebar.header("Parâmetros")
-DY_MIN = st.sidebar.slider("DY mínimo (%)", 3.0, 12.0, 6.0, 0.5) / 100
-ANOS = st.sidebar.slider("Anos seguidos pagando dividendos", 3, 10, 5)
-ROE_MIN = st.sidebar.slider("ROE mínimo (%)", 5, 25, 10) / 100
-DIV_MAX = st.sidebar.slider("Dívida/PL máxima (%)", 20, 150, 70)
-NOTA_MIN = st.sidebar.slider("Nota mínima para compra", 5.0, 10.0, 7.0, 0.5)
-extras = st.sidebar.text_input("Adicionar tickers (ex: ITSA4:Banco, TAEE11:Energia)")
-for item in [x.strip() for x in extras.split(",") if ":" in x]:
-    t, s = item.split(":")
-    CARTEIRA[t.strip().upper()] = s.strip()
-
 PESOS = {
     "Setor perene": 1.0, "Div. consistentes": 2.0, "DY ok": 2.0, "Lucro +": 1.0,
     "ROE ok": 1.5, "Dívida ok": 1.0, "Abaixo do teto": 1.5,
 }
 
+# ---------- Carteira salva no link da página ----------
+def carregar():
+    txt = st.query_params.get("c")
+    if txt:
+        cart = {}
+        for item in txt.split(";"):
+            if ":" in item:
+                t, s = item.split(":", 1)
+                cart[t] = s
+        if cart:
+            return cart
+    return dict(PADRAO)
+
+def salvar():
+    st.query_params["c"] = ";".join(f"{t}:{s}" for t, s in st.session_state.carteira.items())
+
+if "carteira" not in st.session_state:
+    st.session_state.carteira = carregar()
+
+# ---------- Busca de dados ----------
 @st.cache_data(ttl=900)
 def buscar(ticker):
     acao = yf.Ticker(f"{ticker}.SA")
@@ -37,11 +47,50 @@ def buscar(ticker):
         info = {}
     preco = info.get("regularMarketPrice") or info.get("currentPrice") or info.get("previousClose")
     if not preco:
-        fech = acao.history(period="1mo")["Close"].dropna()
-        preco = float(fech.iloc[-1]) if not fech.empty else None
+        try:
+            fech = acao.history(period="1mo")["Close"].dropna()
+            preco = float(fech.iloc[-1]) if not fech.empty else None
+        except Exception:
+            preco = None
     divs = acao.dividends
     return preco, divs, info.get("returnOnEquity"), info.get("debtToEquity"), info.get("trailingPE")
 
+# ---------- Barra lateral ----------
+st.sidebar.header("Minha carteira")
+with st.sidebar.form("adicionar", clear_on_submit=True):
+    novo = st.text_input("Ticker (ex: ITSA4)")
+    setor_novo = st.selectbox("Setor", SETORES)
+    adicionar = st.form_submit_button("➕ Adicionar")
+if adicionar and novo.strip():
+    t = novo.strip().upper().replace(".SA", "")
+    if t in st.session_state.carteira:
+        st.sidebar.info(f"{t} já está na carteira.")
+    elif buscar(t)[0] is None:
+        st.sidebar.error(f"Não encontrei {t} no Yahoo Finance. Confira o ticker.")
+    else:
+        st.session_state.carteira[t] = setor_novo
+        salvar()
+        st.sidebar.success(f"{t} adicionado!")
+
+remover = st.sidebar.multiselect("Remover tickers", list(st.session_state.carteira))
+if st.sidebar.button("🗑️ Remover selecionados") and remover:
+    for t in remover:
+        st.session_state.carteira.pop(t, None)
+    salvar()
+    st.rerun()
+if st.sidebar.button("↩️ Restaurar carteira original"):
+    st.session_state.carteira = dict(PADRAO)
+    salvar()
+    st.rerun()
+
+st.sidebar.header("Parâmetros")
+DY_MIN = st.sidebar.slider("DY mínimo (%)", 3.0, 12.0, 6.0, 0.5) / 100
+ANOS = st.sidebar.slider("Anos seguidos pagando dividendos", 3, 10, 5)
+ROE_MIN = st.sidebar.slider("ROE mínimo (%)", 5, 25, 10) / 100
+DIV_MAX = st.sidebar.slider("Dívida/PL máxima (%)", 20, 150, 70)
+NOTA_MIN = st.sidebar.slider("Nota mínima para compra", 5.0, 10.0, 7.0, 0.5)
+
+# ---------- Avaliação ----------
 def analisar(ticker, setor):
     preco, divs, roe, divida, pl = buscar(ticker)
     ano = datetime.now().year
@@ -56,7 +105,6 @@ def analisar(ticker, setor):
     teto = media3 / DY_MIN if media3 > 0 else None
     dy = ult12 / preco if preco else None
 
-    # True = passou, False = reprovou, None = sem dado (sai da conta)
     crit = {
         "Setor perene": setor in PERENES,
         "Div. consistentes": pagou,
@@ -69,13 +117,7 @@ def analisar(ticker, setor):
     peso_avaliado = sum(PESOS[k] for k, v in crit.items() if v is not None)
     peso_ganho = sum(PESOS[k] for k, v in crit.items() if v)
     nota = round(peso_ganho / peso_avaliado * 10, 1) if peso_avaliado else 0.0
-
-    if nota >= NOTA_MIN:
-        status = "✅ DENTRO"
-    elif nota >= NOTA_MIN - 1.5:
-        status = "⚠️ QUASE"
-    else:
-        status = "❌ FORA"
+    status = "✅ DENTRO" if nota >= NOTA_MIN else "⚠️ QUASE" if nota >= NOTA_MIN - 1.5 else "❌ FORA"
 
     linha = {"Ticker": ticker, "Setor": setor, "Preço": preco, "Teto Bazin": teto,
              "Margem até o teto (%)": (teto / preco - 1) * 100 if preco and teto else None,
@@ -86,6 +128,7 @@ def analisar(ticker, setor):
     linha["Status"] = status
     return linha
 
+# ---------- Página ----------
 st.title("📈 Painel Barsi da minha carteira")
 col1, col2 = st.columns([3, 1])
 col1.caption(f"Atualizado em {datetime.now():%d/%m/%Y %H:%M} · Yahoo Finance (atraso ~15 min) · ➖ = sem dado")
@@ -94,14 +137,16 @@ if col2.button("🔄 Atualizar agora"):
 
 linhas = []
 with st.spinner("Buscando dados..."):
-    for t, s in CARTEIRA.items():
+    for t, s in st.session_state.carteira.items():
         try:
             linhas.append(analisar(t, s))
         except Exception as e:
             st.warning(f"{t}: não consegui buscar os dados ({e})")
 
 df = pd.DataFrame(linhas)
-if not df.empty:
+if df.empty:
+    st.info("A carteira está vazia. Adicione tickers na barra lateral.")
+else:
     df = df.sort_values("Nota (0-10)", ascending=False)
     dentro = (df["Status"] == "✅ DENTRO").sum()
     quase = (df["Status"] == "⚠️ QUASE").sum()
@@ -109,7 +154,7 @@ if not df.empty:
     a.metric("Dentro para compra", dentro)
     b.metric("Quase", quase)
     c.metric("Fora", len(df) - dentro - quase)
-    d.metric("Nota média da carteira", f"{df['Nota (0-10)'].mean():.1f}")
+    d.metric("Nota média", f"{df['Nota (0-10)'].mean():.1f}")
 
     def cor(v):
         return {"✅ DENTRO": "background-color:#2e7d32;color:white",
@@ -124,7 +169,7 @@ if not df.empty:
         use_container_width=True, hide_index=True)
 
     with st.expander("Como a nota é calculada"):
-        st.write(pd.DataFrame({"Critério": PESOS.keys(), "Peso": PESOS.values()}))
+        st.write(pd.DataFrame({"Critério": list(PESOS), "Peso": list(PESOS.values())}))
         st.caption("Critérios sem dado saem da conta; a nota é proporcional aos critérios avaliados.")
 
 st.info("Lembrete: qualidade da gestão e respeito ao minoritário não dá para automatizar. "
