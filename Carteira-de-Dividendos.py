@@ -1,5 +1,3 @@
-# Instalar uma vez:  pip install streamlit yfinance pandas
-# Rodar:             streamlit run painel_barsi.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -11,7 +9,6 @@ CARTEIRA = {
    "ISAE4": "Energia", "PETR4": "Petróleo",
 }
 PERENES = {"Banco", "Energia", "Saneamento", "Seguros", "Telecom"}
-# Barra lateral: ajuste dos parâmetros
 st.sidebar.header("Parâmetros")
 DY_MIN = st.sidebar.slider("DY mínimo (%)", 3.0, 12.0, 6.0, 0.5) / 100
 ANOS = st.sidebar.slider("Anos seguidos pagando dividendos", 3, 10, 5)
@@ -21,42 +18,54 @@ extras = st.sidebar.text_input("Adicionar tickers (ex: ITSA4:Banco, TAEE11:Energ
 for item in [x.strip() for x in extras.split(",") if ":" in x]:
    t, s = item.split(":")
    CARTEIRA[t.strip().upper()] = s.strip()
-@st.cache_data(ttl=900)  # guarda os dados por 15 min
-def analisar(ticker, setor):
+@st.cache_data(ttl=900)
+def buscar(ticker):
    acao = yf.Ticker(f"{ticker}.SA")
-   info = acao.info
-   preco = info.get("currentPrice") or info.get("regularMarketPrice")
+   hist = acao.history(period="5d")
+   preco = float(hist["Close"].iloc[-1]) if not hist.empty else None
    divs = acao.dividends
+   try:
+       info = acao.info or {}
+   except Exception:
+       info = {}
+   return preco, divs, info.get("returnOnEquity"), info.get("debtToEquity"), info.get("trailingPE")
+def analisar(ticker, setor):
+   preco, divs, roe, divida, pl = buscar(ticker)
    ano = datetime.now().year
-   por_ano = divs.groupby(divs.index.year).sum() if not divs.empty else pd.Series(dtype=float)
+   if not divs.empty:
+       por_ano = divs.groupby(divs.index.year).sum()
+       corte = pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1)
+       ult12 = divs[divs.index > corte].sum()
+   else:
+       por_ano, ult12 = pd.Series(dtype=float), 0
    pagou = all(por_ano.get(a, 0) > 0 for a in range(ano - ANOS, ano))
-   corte = pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1) if not divs.empty else None
-   ult12 = divs[divs.index > corte].sum() if corte is not None else 0
-   dy = ult12 / preco if preco else 0
    media3 = por_ano.reindex(range(ano - 3, ano)).fillna(0).mean() if not por_ano.empty else 0
    teto = media3 / DY_MIN
-   roe, divida, pl = info.get("returnOnEquity"), info.get("debtToEquity"), info.get("trailingPE")
+   dy = ult12 / preco if preco else None
+   # True = passou, False = reprovou, None = sem dado (não conta)
    crit = {
        "Setor perene": setor in PERENES,
        f"Div. {ANOS} anos": pagou,
-       "DY ok": dy >= DY_MIN,
-       "Lucro +": pl is not None and pl > 0,
-       "ROE ok": roe is not None and roe >= ROE_MIN,
-       "Dívida ok": divida is None or divida < DIV_MAX,
-       "Abaixo do teto": bool(preco) and preco < teto,
+       "DY ok": None if dy is None else dy >= DY_MIN,
+       "Lucro +": None if pl is None else pl > 0,
+       "ROE ok": None if roe is None else roe >= ROE_MIN,
+       "Dívida ok": None if divida is None else divida < DIV_MAX,
+       "Abaixo do teto": None if not preco or teto == 0 else preco < teto,
    }
-   n = sum(crit.values())
-   status = "✅ DENTRO" if n == len(crit) else "⚠️ QUASE" if n == len(crit) - 1 else "❌ FORA"
+   avaliados = [v for v in crit.values() if v is not None]
+   n, total = sum(avaliados), len(avaliados)
+   status = "✅ DENTRO" if n == total else "⚠️ QUASE" if n == total - 1 else "❌ FORA"
    linha = {"Ticker": ticker, "Setor": setor, "Preço": preco, "Teto Bazin": teto,
-            "Margem até o teto (%)": (teto / preco - 1) * 100 if preco else None,
-            "DY 12m (%)": dy * 100, "ROE (%)": roe * 100 if roe else None, "P/L": pl}
-   linha.update({k: "✅" if v else "❌" for k, v in crit.items()})
-   linha["Nota"] = f"{n}/{len(crit)}"
+            "Margem até o teto (%)": (teto / preco - 1) * 100 if preco and teto else None,
+            "DY 12m (%)": dy * 100 if dy is not None else None,
+            "ROE (%)": roe * 100 if roe is not None else None, "P/L": pl}
+   linha.update({k: "➖" if v is None else ("✅" if v else "❌") for k, v in crit.items()})
+   linha["Nota"] = f"{n}/{total}"
    linha["Status"] = status
    return linha
 st.title("📈 Painel Barsi da minha carteira")
 col1, col2 = st.columns([3, 1])
-col1.caption(f"Atualizado em {datetime.now():%d/%m/%Y %H:%M} · dados do Yahoo Finance (atraso ~15 min)")
+col1.caption(f"Atualizado em {datetime.now():%d/%m/%Y %H:%M} · Yahoo Finance (atraso ~15 min) · ➖ = sem dado")
 if col2.button("🔄 Atualizar agora"):
    st.cache_data.clear()
 linhas = []
@@ -75,8 +84,9 @@ if not df.empty:
    b.metric("Quase", quase)
    c.metric("Fora", len(df) - dentro - quase)
    def cor(v):
-       return {"✅ DENTRO": "background-color:#c8f7c5", "⚠️ QUASE": "background-color:#fff3b0",
-               "❌ FORA": "background-color:#f7c5c5"}.get(v, "")
+       return {"✅ DENTRO": "background-color:#2e7d32;color:white",
+               "⚠️ QUASE": "background-color:#f9a825;color:black",
+               "❌ FORA": "background-color:#c62828;color:white"}.get(v, "")
    st.dataframe(
        df.style.map(cor, subset=["Status"]).format({
            "Preço": "R$ {:.2f}", "Teto Bazin": "R$ {:.2f}", "Margem até o teto (%)": "{:+.1f}",
@@ -84,8 +94,6 @@ if not df.empty:
        use_container_width=True, hide_index=True)
 st.info("Lembrete: qualidade da gestão e respeito ao minoritário não dá para automatizar. "
        "Isto é uma ferramenta de apoio, não uma recomendação de compra.")
-# Instalar uma vez:  pip install streamlit yfinance pandas
-# Rodar:             streamlit run painel_barsi.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -97,7 +105,6 @@ CARTEIRA = {
    "ISAE4": "Energia", "PETR4": "Petróleo",
 }
 PERENES = {"Banco", "Energia", "Saneamento", "Seguros", "Telecom"}
-# Barra lateral: ajuste dos parâmetros
 st.sidebar.header("Parâmetros")
 DY_MIN = st.sidebar.slider("DY mínimo (%)", 3.0, 12.0, 6.0, 0.5) / 100
 ANOS = st.sidebar.slider("Anos seguidos pagando dividendos", 3, 10, 5)
@@ -107,42 +114,54 @@ extras = st.sidebar.text_input("Adicionar tickers (ex: ITSA4:Banco, TAEE11:Energ
 for item in [x.strip() for x in extras.split(",") if ":" in x]:
    t, s = item.split(":")
    CARTEIRA[t.strip().upper()] = s.strip()
-@st.cache_data(ttl=900)  # guarda os dados por 15 min
-def analisar(ticker, setor):
+@st.cache_data(ttl=900)
+def buscar(ticker):
    acao = yf.Ticker(f"{ticker}.SA")
-   info = acao.info
-   preco = info.get("currentPrice") or info.get("regularMarketPrice")
+   hist = acao.history(period="5d")
+   preco = float(hist["Close"].iloc[-1]) if not hist.empty else None
    divs = acao.dividends
+   try:
+       info = acao.info or {}
+   except Exception:
+       info = {}
+   return preco, divs, info.get("returnOnEquity"), info.get("debtToEquity"), info.get("trailingPE")
+def analisar(ticker, setor):
+   preco, divs, roe, divida, pl = buscar(ticker)
    ano = datetime.now().year
-   por_ano = divs.groupby(divs.index.year).sum() if not divs.empty else pd.Series(dtype=float)
+   if not divs.empty:
+       por_ano = divs.groupby(divs.index.year).sum()
+       corte = pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1)
+       ult12 = divs[divs.index > corte].sum()
+   else:
+       por_ano, ult12 = pd.Series(dtype=float), 0
    pagou = all(por_ano.get(a, 0) > 0 for a in range(ano - ANOS, ano))
-   corte = pd.Timestamp.now(tz=divs.index.tz) - pd.DateOffset(years=1) if not divs.empty else None
-   ult12 = divs[divs.index > corte].sum() if corte is not None else 0
-   dy = ult12 / preco if preco else 0
    media3 = por_ano.reindex(range(ano - 3, ano)).fillna(0).mean() if not por_ano.empty else 0
    teto = media3 / DY_MIN
-   roe, divida, pl = info.get("returnOnEquity"), info.get("debtToEquity"), info.get("trailingPE")
+   dy = ult12 / preco if preco else None
+   # True = passou, False = reprovou, None = sem dado (não conta)
    crit = {
        "Setor perene": setor in PERENES,
        f"Div. {ANOS} anos": pagou,
-       "DY ok": dy >= DY_MIN,
-       "Lucro +": pl is not None and pl > 0,
-       "ROE ok": roe is not None and roe >= ROE_MIN,
-       "Dívida ok": divida is None or divida < DIV_MAX,
-       "Abaixo do teto": bool(preco) and preco < teto,
+       "DY ok": None if dy is None else dy >= DY_MIN,
+       "Lucro +": None if pl is None else pl > 0,
+       "ROE ok": None if roe is None else roe >= ROE_MIN,
+       "Dívida ok": None if divida is None else divida < DIV_MAX,
+       "Abaixo do teto": None if not preco or teto == 0 else preco < teto,
    }
-   n = sum(crit.values())
-   status = "✅ DENTRO" if n == len(crit) else "⚠️ QUASE" if n == len(crit) - 1 else "❌ FORA"
+   avaliados = [v for v in crit.values() if v is not None]
+   n, total = sum(avaliados), len(avaliados)
+   status = "✅ DENTRO" if n == total else "⚠️ QUASE" if n == total - 1 else "❌ FORA"
    linha = {"Ticker": ticker, "Setor": setor, "Preço": preco, "Teto Bazin": teto,
-            "Margem até o teto (%)": (teto / preco - 1) * 100 if preco else None,
-            "DY 12m (%)": dy * 100, "ROE (%)": roe * 100 if roe else None, "P/L": pl}
-   linha.update({k: "✅" if v else "❌" for k, v in crit.items()})
-   linha["Nota"] = f"{n}/{len(crit)}"
+            "Margem até o teto (%)": (teto / preco - 1) * 100 if preco and teto else None,
+            "DY 12m (%)": dy * 100 if dy is not None else None,
+            "ROE (%)": roe * 100 if roe is not None else None, "P/L": pl}
+   linha.update({k: "➖" if v is None else ("✅" if v else "❌") for k, v in crit.items()})
+   linha["Nota"] = f"{n}/{total}"
    linha["Status"] = status
    return linha
 st.title("📈 Painel Barsi da minha carteira")
 col1, col2 = st.columns([3, 1])
-col1.caption(f"Atualizado em {datetime.now():%d/%m/%Y %H:%M} · dados do Yahoo Finance (atraso ~15 min)")
+col1.caption(f"Atualizado em {datetime.now():%d/%m/%Y %H:%M} · Yahoo Finance (atraso ~15 min) · ➖ = sem dado")
 if col2.button("🔄 Atualizar agora"):
    st.cache_data.clear()
 linhas = []
@@ -161,8 +180,9 @@ if not df.empty:
    b.metric("Quase", quase)
    c.metric("Fora", len(df) - dentro - quase)
    def cor(v):
-       return {"✅ DENTRO": "background-color:#c8f7c5", "⚠️ QUASE": "background-color:#fff3b0",
-               "❌ FORA": "background-color:#f7c5c5"}.get(v, "")
+       return {"✅ DENTRO": "background-color:#2e7d32;color:white",
+               "⚠️ QUASE": "background-color:#f9a825;color:black",
+               "❌ FORA": "background-color:#c62828;color:white"}.get(v, "")
    st.dataframe(
        df.style.map(cor, subset=["Status"]).format({
            "Preço": "R$ {:.2f}", "Teto Bazin": "R$ {:.2f}", "Margem até o teto (%)": "{:+.1f}",
