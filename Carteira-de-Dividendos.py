@@ -147,14 +147,30 @@ df = pd.DataFrame(linhas)
 if df.empty:
     st.info("A carteira está vazia. Adicione tickers na barra lateral.")
 else:
-    df = df.sort_values("Nota (0-10)", ascending=False)
-    dentro = (df["Status"] == "✅ DENTRO").sum()
-    quase = (df["Status"] == "⚠️ QUASE").sum()
-    a, b, c, d = st.columns(4)
-    a.metric("Dentro para compra", dentro)
-    b.metric("Quase", quase)
-    c.metric("Fora", len(df) - dentro - quase)
-    d.metric("Nota média", f"{df['Nota (0-10)'].mean():.1f}")
+    fora = len(df) - dentro - quase
+    media = df["Nota (0-10)"].mean()
+    cartoes = [("✅ Dentro", dentro, "#2e7d32"), ("⚠️ Quase", quase, "#f9a825"),
+              ("❌ Fora", fora, "#c62828"), ("⭐ Média", f"{media:.1f}", "#1565c0")]
+    html = "".join(
+       f"<div style='flex:1;min-width:0;border-left:4px solid {c};background:rgba(255,255,255,0.05);"
+       f"border-radius:8px;padding:8px 6px;text-align:center'>"
+       f"<div style='font-size:0.75rem;opacity:0.8;white-space:nowrap'>{rot}</div>"
+       f"<div style='font-size:1.6rem;font-weight:700;line-height:1.2'>{val}</div></div>"
+       for rot, val, c in cartoes)
+    st.markdown(f"<div style='display:flex;gap:8px;margin:8px 0 16px'>{html}</div>",
+               unsafe_allow_html=True)
+    fora = len(df) - dentro - quase
+    media = df["Nota (0-10)"].mean()
+    cartoes = [("✅ Dentro", dentro, "#2e7d32"), ("⚠️ Quase", quase, "#f9a825"),
+              ("❌ Fora", fora, "#c62828"), ("⭐ Média", f"{media:.1f}", "#1565c0")]
+    html = "".join(
+       f"<div style='flex:1;min-width:0;border-left:4px solid {c};background:rgba(255,255,255,0.05);"
+       f"border-radius:8px;padding:8px 6px;text-align:center'>"
+       f"<div style='font-size:0.75rem;opacity:0.8;white-space:nowrap'>{rot}</div>"
+       f"<div style='font-size:1.6rem;font-weight:700;line-height:1.2'>{val}</div></div>"
+       for rot, val, c in cartoes)
+    st.markdown(f"<div style='display:flex;gap:8px;margin:8px 0 16px'>{html}</div>",
+               unsafe_allow_html=True)
 
     def cor(v):
         return {"✅ DENTRO": "background-color:#2e7d32;color:white",
